@@ -163,6 +163,91 @@ namespace FocusRgb.Plugin.Steam.Tests
             Assert.Contains("new-game.exe", refreshed.Game!.Executables);
         }
 
+        [Fact]
+        public async Task ReadAsync_ReturnsWithinBudgetAndSharesBlockedScan_WithConcurrentRequests()
+        {
+            using var locator = new BlockingLocator(null);
+            using var reader = new SteamCatalogReader(locator, TimeSpan.FromMilliseconds(100));
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                var first = reader.ReadAsync(TestContext.Current.CancellationToken);
+                Assert.True(locator.Entered.Wait(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+                var second = reader.ReadAsync(TestContext.Current.CancellationToken);
+
+                Assert.Empty(await first.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+                Assert.Empty(await second.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+                Assert.True(watch.Elapsed < TimeSpan.FromSeconds(2));
+                Assert.True(reader.IsScanIncomplete);
+                Assert.Equal(1, locator.Calls);
+            }
+            finally
+            {
+                locator.Release.Set();
+            }
+        }
+
+        [Fact]
+        public async Task ReadAsync_PreservesCachedGames_WhenRefreshExceedsBudget()
+        {
+            var steamRoot = Path.Combine(_directory, "Steam");
+            CopyFixture("appmanifest_570.acf", Path.Combine(steamRoot, "steamapps"));
+            using var locator = new BlockingLocator(steamRoot);
+            locator.Release.Set();
+            using var reader = new SteamCatalogReader(locator, TimeSpan.FromSeconds(1));
+            var original = Assert.Single(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            locator.Release.Reset();
+            try
+            {
+                var cached = Assert.Single(await reader.ReadAsync(TestContext.Current.CancellationToken));
+
+                Assert.Same(original, cached);
+                Assert.True(reader.IsScanIncomplete);
+            }
+            finally
+            {
+                reader.Dispose();
+                locator.Release.Set();
+            }
+        }
+
+        [Fact]
+        public async Task ReadAsync_CancelsWaitingCaller_WithoutDuplicatingOrCancellingSharedScan()
+        {
+            using var locator = new BlockingLocator(null);
+            using var reader = new SteamCatalogReader(locator, TimeSpan.FromMilliseconds(100));
+            using var cancellation = new CancellationTokenSource();
+            try
+            {
+                var waiting = reader.ReadAsync(cancellation.Token);
+                Assert.True(locator.Entered.Wait(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+                cancellation.Cancel();
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
+
+                Assert.Empty(await reader.ReadAsync(TestContext.Current.CancellationToken));
+                Assert.Equal(1, locator.Calls);
+            }
+            finally
+            {
+                locator.Release.Set();
+            }
+        }
+
+        [Fact]
+        public async Task ReadAsync_PrunesRemovedGames_OnlyAfterCompleteScan()
+        {
+            var steamRoot = Path.Combine(_directory, "Steam");
+            var steamApps = Path.Combine(steamRoot, "steamapps");
+            CopyFixture("appmanifest_570.acf", steamApps);
+            using var reader = new SteamCatalogReader(new StubLocator(steamRoot));
+            Assert.Single(await reader.ReadAsync(TestContext.Current.CancellationToken));
+
+            File.Delete(Path.Combine(steamApps, "appmanifest_570.acf"));
+
+            Assert.Empty(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            Assert.False(reader.IsScanIncomplete);
+        }
+
         public void Dispose()
         {
             if (Directory.Exists(_directory))
@@ -201,6 +286,28 @@ namespace FocusRgb.Plugin.Steam.Tests
         private sealed class StubLocator(string? path) : ISteamRootLocator
         {
             public string? FindSteamRoot() => path;
+        }
+
+        private sealed class BlockingLocator(string? path) : ISteamRootLocator, IDisposable
+        {
+            private int _calls;
+            public ManualResetEventSlim Entered { get; } = new();
+            public ManualResetEventSlim Release { get; } = new();
+            public int Calls => Volatile.Read(ref _calls);
+
+            public string? FindSteamRoot()
+            {
+                Interlocked.Increment(ref _calls);
+                Entered.Set();
+                Release.Wait();
+                return path;
+            }
+
+            public void Dispose()
+            {
+                Release.Set();
+                // The scan may still be returning from a blocked OS call; it owns its remaining lifetime.
+            }
         }
     }
 }

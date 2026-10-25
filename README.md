@@ -9,6 +9,13 @@ The plugin does not start Steam, launch games, inspect running processes or memo
 telemetry, or control lighting. Local installation paths never leave the plugin. Its manifest
 therefore declares only `filesystem.read`.
 
+Catalog requests share one background scan with a three-second total budget, below the host's
+five-second timeout. Slow scans return cached or partial games with `catalog-scan-incomplete`
+and no fresh timestamp; refresh to continue. Interrupted scans retain unvisited cached games.
+Cancellation stops waiting immediately, and plugin shutdown cancels the shared scan. A blocked
+filesystem call cannot be forcibly interrupted, but it never spawns duplicate scans or holds up
+a catalog response beyond its budget.
+
 ## Build and test
 
 `FocusRgb.PluginSdk` 1.2.0 restores from nuget.org without repository credentials:
