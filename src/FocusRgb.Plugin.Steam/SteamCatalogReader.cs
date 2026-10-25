@@ -17,10 +17,10 @@ namespace FocusRgb.Plugin.Steam
             foreach (var library in await ReadLibraryRootsAsync(steamRoot, cancellationToken).ConfigureAwait(false))
             {
                 var steamApps = Path.Combine(library, "steamapps");
-                IEnumerable<string> manifests;
+                string[] manifests;
                 try
                 {
-                    manifests = Directory.EnumerateFiles(steamApps, "appmanifest_*.acf", SearchOption.TopDirectoryOnly);
+                    manifests = Directory.GetFiles(steamApps, "appmanifest_*.acf", SearchOption.TopDirectoryOnly);
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
@@ -82,7 +82,8 @@ namespace FocusRgb.Plugin.Steam
                     }
                 }
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException)
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+                or ArgumentException or NotSupportedException or FormatException)
             {
             }
 
@@ -132,7 +133,8 @@ namespace FocusRgb.Plugin.Steam
                     }
                 };
             }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or FormatException)
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
+                or ArgumentException or NotSupportedException or FormatException)
             {
                 return null;
             }
