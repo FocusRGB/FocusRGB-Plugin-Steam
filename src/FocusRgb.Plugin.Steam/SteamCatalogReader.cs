@@ -4,6 +4,21 @@ namespace FocusRgb.Plugin.Steam
 {
     internal sealed class SteamCatalogReader(ISteamRootLocator rootLocator)
     {
+        private const int MaximumLibraries = 64;
+        private const int MaximumManifests = 4096;
+        private const int MaximumExecutablesPerGame = 256;
+        private const int MaximumScanEntries = 10000;
+        private const int MaximumManifestBytes = 2 * 1024 * 1024;
+        private const int MaximumLibraryFileBytes = 4 * 1024 * 1024;
+        private const int MaximumExecutableDepth = 8;
+        private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(1);
+        private static readonly string[] ExcludedDirectories =
+            ["_CommonRedist", "redist", "redistributables", "installers", "support"];
+        private static readonly string[] ExcludedExecutablePrefixes =
+            ["unitycrashhandler", "crashreportclient", "crashpad_handler", "vc_redist", "vcredist", "dotnetfx", "ueprereqsetup", "installer", "easyanticheat", "beservice"];
+        private readonly Dictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly object _cacheGate = new();
+
         public bool IsInstalled => TryGetSteamRoot(out _);
 
         public async Task<IReadOnlyList<PluginCatalogItem>> ReadAsync(CancellationToken cancellationToken)
@@ -14,13 +29,16 @@ namespace FocusRgb.Plugin.Steam
             }
 
             var games = new Dictionary<string, PluginCatalogItem>(StringComparer.Ordinal);
+            var seenManifests = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var library in await ReadLibraryRootsAsync(steamRoot, cancellationToken).ConfigureAwait(false))
             {
                 var steamApps = Path.Combine(library, "steamapps");
                 string[] manifests;
                 try
                 {
-                    manifests = Directory.GetFiles(steamApps, "appmanifest_*.acf", SearchOption.TopDirectoryOnly);
+                    manifests = [.. Directory.EnumerateFiles(
+                        steamApps, "appmanifest_*.acf", SearchOption.TopDirectoryOnly)
+                        .Take(MaximumManifests - seenManifests.Count)];
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
@@ -30,11 +48,20 @@ namespace FocusRgb.Plugin.Steam
                 foreach (var manifestPath in manifests)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    seenManifests.Add(manifestPath);
                     var game = await ReadGameAsync(steamApps, manifestPath, cancellationToken).ConfigureAwait(false);
                     if (game is not null)
                     {
                         games[game.ResourceId] = game;
                     }
+                }
+            }
+
+            lock (_cacheGate)
+            {
+                foreach (var removed in _cache.Keys.Except(seenManifests, StringComparer.OrdinalIgnoreCase).ToArray())
+                {
+                    _cache.Remove(removed);
                 }
             }
 
@@ -45,7 +72,8 @@ namespace FocusRgb.Plugin.Steam
         private bool TryGetSteamRoot(out string steamRoot)
         {
             steamRoot = rootLocator.FindSteamRoot() ?? string.Empty;
-            return steamRoot.Length > 0 && Directory.Exists(Path.Combine(steamRoot, "steamapps"));
+            return steamRoot.Length > 0 && !IsNetworkPath(steamRoot)
+                && Directory.Exists(Path.Combine(steamRoot, "steamapps"));
         }
 
         private static async Task<IReadOnlyList<string>> ReadLibraryRootsAsync(
@@ -61,7 +89,8 @@ namespace FocusRgb.Plugin.Steam
 
             try
             {
-                var document = VdfParser.Parse(await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false));
+                var document = VdfParser.Parse(await ReadBoundedTextAsync(
+                    path, MaximumLibraryFileBytes, cancellationToken).ConfigureAwait(false));
                 var libraries = document.GetObject("libraryfolders");
                 if (libraries is null)
                 {
@@ -78,7 +107,11 @@ namespace FocusRgb.Plugin.Steam
                     };
                     if (!string.IsNullOrWhiteSpace(libraryPath))
                     {
-                        roots.Add(Path.GetFullPath(libraryPath));
+                        var fullPath = Path.GetFullPath(libraryPath);
+                        if (!IsNetworkPath(fullPath) && roots.Count < MaximumLibraries)
+                        {
+                            roots.Add(fullPath);
+                        }
                     }
                 }
             }
@@ -90,21 +123,41 @@ namespace FocusRgb.Plugin.Steam
             return [.. roots];
         }
 
-        private static async Task<PluginCatalogItem?> ReadGameAsync(
+        private async Task<PluginCatalogItem?> ReadGameAsync(
             string steamApps,
             string manifestPath,
             CancellationToken cancellationToken)
         {
             try
             {
+                var manifest = new FileInfo(manifestPath);
+                var stamp = manifest.LastWriteTimeUtc.Ticks;
+                lock (_cacheGate)
+                {
+                    if (_cache.TryGetValue(manifestPath, out var cached)
+                        && cached.LastWriteTicks == stamp
+                        && cached.Length == manifest.Length
+                        && DateTimeOffset.UtcNow - cached.CachedAt < CacheLifetime)
+                    {
+                        return cached.Game;
+                    }
+                }
                 var document = VdfParser.Parse(
-                    await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false));
+                    await ReadBoundedTextAsync(
+                        manifestPath, MaximumManifestBytes, cancellationToken).ConfigureAwait(false));
                 var state = document.GetObject("AppState");
                 var appId = state?.GetString("appid");
                 var name = state?.GetString("name");
                 var installDirectoryName = state?.GetString("installdir");
                 if (string.IsNullOrWhiteSpace(appId) || !appId.All(char.IsAsciiDigit)
                     || string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(installDirectoryName))
+                {
+                    return null;
+                }
+
+                if (installDirectoryName is "." or ".."
+                    || Path.IsPathRooted(installDirectoryName)
+                    || Path.GetFileName(installDirectoryName) != installDirectoryName)
                 {
                     return null;
                 }
@@ -119,7 +172,7 @@ namespace FocusRgb.Plugin.Steam
                 var directoryExists = Directory.Exists(installDirectory);
                 var executables = directoryExists ? ReadExecutables(installDirectory, cancellationToken) : [];
                 var available = executables.Count > 0;
-                return new PluginCatalogItem
+                var game = new PluginCatalogItem
                 {
                     ResourceId = appId,
                     DisplayName = name,
@@ -130,6 +183,15 @@ namespace FocusRgb.Plugin.Steam
                         Executables = executables
                     }
                 };
+                lock (_cacheGate)
+                {
+                    if (_cache.Count >= MaximumManifests)
+                    {
+                        _cache.Clear();
+                    }
+                    _cache[manifestPath] = new CacheEntry(stamp, manifest.Length, DateTimeOffset.UtcNow, game);
+                }
+                return game;
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
                 or ArgumentException or NotSupportedException or FormatException)
@@ -147,15 +209,30 @@ namespace FocusRgb.Plugin.Steam
                 var options = new EnumerationOptions
                 {
                     RecurseSubdirectories = true,
+                    MaxRecursionDepth = MaximumExecutableDepth,
                     IgnoreInaccessible = true,
                     AttributesToSkip = FileAttributes.ReparsePoint,
                     MatchCasing = MatchCasing.CaseInsensitive
                 };
                 var executables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var path in Directory.EnumerateFiles(installDirectory, "*.exe", options))
+                foreach (var path in Directory.EnumerateFileSystemEntries(installDirectory, "*", options)
+                    .Take(MaximumScanEntries))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    if (!path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || Directory.Exists(path))
+                    {
+                        continue;
+                    }
+                    var relative = Path.GetRelativePath(installDirectory, path);
+                    if (IsExcludedExecutable(relative))
+                    {
+                        continue;
+                    }
                     executables.Add(Path.GetFileName(path));
+                    if (executables.Count >= MaximumExecutablesPerGame)
+                    {
+                        break;
+                    }
                 }
 
                 return [.. executables.Order(StringComparer.OrdinalIgnoreCase)];
@@ -174,6 +251,54 @@ namespace FocusRgb.Plugin.Steam
                 && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
         }
 
+        private static bool IsExcludedExecutable(string relativePath)
+        {
+            var segments = relativePath.Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries);
+            if (segments.Take(segments.Length - 1).Any(segment =>
+                ExcludedDirectories.Contains(segment, StringComparer.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+            var name = Path.GetFileName(relativePath);
+            return ExcludedExecutablePrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                || name.Equals("dxsetup.exe", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("setup.exe", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("uninstall.exe", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("unins", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsNetworkPath(string path)
+        {
+            if (new Uri(path).IsUnc) return true;
+            try
+            {
+                var root = Path.GetPathRoot(path);
+                return root is not null && new DriveInfo(root).DriveType == DriveType.Network;
+            }
+            catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException)
+            {
+                return true;
+            }
+        }
+
+        private static async Task<string> ReadBoundedTextAsync(
+            string path,
+            int maximumBytes,
+            CancellationToken cancellationToken)
+        {
+            await using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
+                4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            if (stream.Length > maximumBytes) throw new FormatException("The Steam metadata file is too large.");
+            using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true);
+            var buffer = new char[maximumBytes + 1];
+            var count = await reader.ReadBlockAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+            if (count > maximumBytes) throw new FormatException("The Steam metadata file is too large.");
+            return new string(buffer, 0, count);
+        }
+
         private static PluginReason MissingGameReason(bool directoryExists) => directoryExists
             ? new PluginReason
             {
@@ -185,5 +310,11 @@ namespace FocusRgb.Plugin.Steam
                 Code = "game-files-missing",
                 Message = "Steam lists the game, but its installation directory is unavailable."
             };
+
+        private sealed record CacheEntry(
+            long LastWriteTicks,
+            long Length,
+            DateTimeOffset CachedAt,
+            PluginCatalogItem Game);
     }
 }

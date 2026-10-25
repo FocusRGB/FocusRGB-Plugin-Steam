@@ -19,21 +19,27 @@ namespace FocusRgb.Plugin.Steam
 
     internal static class VdfParser
     {
+        private const int MaximumDocumentLength = 4 * 1024 * 1024;
+        private const int MaximumDepth = 64;
+
         public static VdfObject Parse(string text)
         {
             ArgumentNullException.ThrowIfNull(text);
+            if (text.Length > MaximumDocumentLength)
+                throw new FormatException("The VDF document is too large.");
             var tokenizer = new Tokenizer(text);
-            return ParseObject(tokenizer, false);
+            return ParseObject(tokenizer, 0);
         }
 
-        private static VdfObject ParseObject(Tokenizer tokenizer, bool nested)
+        private static VdfObject ParseObject(Tokenizer tokenizer, int depth)
         {
+            if (depth > MaximumDepth) throw new FormatException("The VDF document is nested too deeply.");
             var result = new VdfObject();
             while (tokenizer.Read() is { } key)
             {
-                if (key == "}")
+                if (!key.Quoted && key.Value == "}")
                 {
-                    if (!nested)
+                    if (depth == 0)
                     {
                         throw new FormatException("Unexpected closing brace in VDF document.");
                     }
@@ -41,17 +47,18 @@ namespace FocusRgb.Plugin.Steam
                     return result;
                 }
 
-                if (key == "{")
+                if (!key.Quoted && key.Value == "{")
                 {
                     throw new FormatException("A VDF object requires a key.");
                 }
 
                 var value = tokenizer.Read()
-                    ?? throw new FormatException($"VDF key '{key}' has no value.");
-                result.Add(key, value == "{" ? ParseObject(tokenizer, true) : value);
+                    ?? throw new FormatException($"VDF key '{key.Value}' has no value.");
+                result.Add(key.Value,
+                    !value.Quoted && value.Value == "{" ? ParseObject(tokenizer, depth + 1) : value.Value);
             }
 
-            if (nested)
+            if (depth > 0)
             {
                 throw new FormatException("VDF object is missing a closing brace.");
             }
@@ -63,7 +70,7 @@ namespace FocusRgb.Plugin.Steam
         {
             private int _offset;
 
-            public string? Read()
+            public Token? Read()
             {
                 SkipTrivia();
                 if (_offset >= text.Length)
@@ -73,7 +80,7 @@ namespace FocusRgb.Plugin.Steam
 
                 if (text[_offset] is '{' or '}')
                 {
-                    return text[_offset++].ToString();
+                    return new Token(text[_offset++].ToString(), Quoted: false);
                 }
 
                 if (text[_offset] != '"')
@@ -85,7 +92,7 @@ namespace FocusRgb.Plugin.Steam
                         _offset++;
                     }
 
-                    return text[start.._offset];
+                    return new Token(text[start.._offset], Quoted: false);
                 }
 
                 _offset++;
@@ -95,7 +102,7 @@ namespace FocusRgb.Plugin.Steam
                     var character = text[_offset++];
                     if (character == '"')
                     {
-                        return value.ToString();
+                        return new Token(value.ToString(), Quoted: true);
                     }
 
                     if (character == '\\' && _offset < text.Length
@@ -134,5 +141,7 @@ namespace FocusRgb.Plugin.Steam
                 }
             }
         }
+
+        private sealed record Token(string Value, bool Quoted);
     }
 }

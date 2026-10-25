@@ -18,5 +18,23 @@ namespace FocusRgb.Plugin.Steam.Tests
         {
             Assert.Throws<FormatException>(() => VdfParser.Parse("\"root\" { \"key\" \"value\""));
         }
+
+        [Fact]
+        public void Parse_TreatsQuotedBraceAsAValue()
+        {
+            var document = VdfParser.Parse("\"root\" { \"value\" \"{\" }");
+
+            Assert.Equal("{", document.GetObject("root")!.GetString("value"));
+        }
+
+        [Fact]
+        public void Parse_RejectsExcessiveDepthAndSize()
+        {
+            var deep = string.Concat(Enumerable.Repeat("\"node\" { ", 66))
+                + string.Concat(Enumerable.Repeat("}", 66));
+
+            Assert.Throws<FormatException>(() => VdfParser.Parse(deep));
+            Assert.Throws<FormatException>(() => VdfParser.Parse(new string('x', 4 * 1024 * 1024 + 1)));
+        }
     }
 }

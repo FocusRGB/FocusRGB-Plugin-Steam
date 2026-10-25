@@ -15,6 +15,8 @@ namespace FocusRgb.Plugin.Steam.Tests
             WriteLibraryFolders(steamRoot, secondLibrary);
             Touch(Path.Combine(steamRoot, "steamapps", "common", "Synthetic Dota", "game.exe"));
             Touch(Path.Combine(steamRoot, "steamapps", "common", "Synthetic Dota", "bin", "GAME.EXE"));
+            Touch(Path.Combine(steamRoot, "steamapps", "common", "Synthetic Dota", "UnityCrashHandler64.exe"));
+            Touch(Path.Combine(steamRoot, "steamapps", "common", "Synthetic Dota", "_CommonRedist", "vc_redist.x64.exe"));
             Touch(Path.Combine(secondLibrary, "steamapps", "common", "Synthetic Counter-Strike", "cs2.exe"));
 
             var games = await new SteamCatalogReader(new StubLocator(steamRoot))
@@ -89,12 +91,76 @@ namespace FocusRgb.Plugin.Steam.Tests
         }
 
         [Fact]
+        public async Task ReadAsync_IgnoresDotInstallDirectoryAndOversizedManifest()
+        {
+            var steamApps = Path.Combine(_directory, "Steam", "steamapps");
+            Directory.CreateDirectory(steamApps);
+            await File.WriteAllTextAsync(
+                Path.Combine(steamApps, "appmanifest_1.acf"),
+                "\"AppState\" { \"appid\" \"1\" \"name\" \"All games\" \"installdir\" \".\" }",
+                TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                Path.Combine(steamApps, "appmanifest_2.acf"),
+                new string('x', 2 * 1024 * 1024 + 1),
+                TestContext.Current.CancellationToken);
+
+            var games = await new SteamCatalogReader(new StubLocator(Path.Combine(_directory, "Steam")))
+                .ReadAsync(TestContext.Current.CancellationToken);
+
+            Assert.Empty(games);
+        }
+
+        [Fact]
+        public async Task ReadAsync_BoundsExecutableCountAndDepth_WithNonAsciiPath()
+        {
+            var steamRoot = Path.Combine(_directory, "Stéam");
+            CopyFixture("appmanifest_570.acf", Path.Combine(steamRoot, "steamapps"));
+            var install = Path.Combine(steamRoot, "steamapps", "common", "Synthetic Dota");
+            for (var index = 0; index < 300; index++)
+            {
+                Touch(Path.Combine(install, $"game-{index:D3}.exe"));
+            }
+            var deep = install;
+            for (var depth = 0; depth < 10; depth++) deep = Path.Combine(deep, $"d{depth}");
+            Touch(Path.Combine(deep, "too-deep.exe"));
+
+            var game = Assert.Single(await new SteamCatalogReader(new StubLocator(steamRoot))
+                .ReadAsync(TestContext.Current.CancellationToken));
+
+            Assert.True(game.Available);
+            Assert.Equal(256, game.Game!.Executables.Count);
+            Assert.DoesNotContain("too-deep.exe", game.Game.Executables);
+        }
+
+        [Fact]
         public async Task ReadAsync_ReturnsEmpty_WhenSteamIsUnavailable()
         {
             var reader = new SteamCatalogReader(new StubLocator(null));
 
             Assert.False(reader.IsInstalled);
             Assert.Empty(await reader.ReadAsync(TestContext.Current.CancellationToken));
+        }
+
+        [Fact]
+        public async Task ReadAsync_ReusesUnchangedManifestAndInvalidatesChangedManifest()
+        {
+            var steamRoot = Path.Combine(_directory, "Steam");
+            var steamApps = Path.Combine(steamRoot, "steamapps");
+            CopyFixture("appmanifest_570.acf", steamApps);
+            var install = Path.Combine(steamApps, "common", "Synthetic Dota");
+            Touch(Path.Combine(install, "game.exe"));
+            var reader = new SteamCatalogReader(new StubLocator(steamRoot));
+            var original = Assert.Single(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            Touch(Path.Combine(install, "new-game.exe"));
+
+            var cached = Assert.Single(await reader.ReadAsync(TestContext.Current.CancellationToken));
+
+            Assert.Same(original, cached);
+            Assert.DoesNotContain("new-game.exe", cached.Game!.Executables);
+            await File.AppendAllTextAsync(Path.Combine(steamApps, "appmanifest_570.acf"),
+                "\n// changed", TestContext.Current.CancellationToken);
+            var refreshed = Assert.Single(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            Assert.Contains("new-game.exe", refreshed.Game!.Executables);
         }
 
         public void Dispose()
