@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+      MSBUILDDISABLENODEREUSE: 1
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out protocol 1.2 conformance
+        uses: actions/checkout@v7
+        with:
+          repository: FocusRGB/FocusRGB
+          ref: spec-v1.2.0
+          path: build/focusrgb-spec
+          sparse-checkout: |
+            sdk/conformance
+            sdk/spec
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - run: dotnet restore FocusRGB-Plugin-Steam.slnx
+      - run: dotnet build FocusRGB-Plugin-Steam.slnx -c Release --no-restore --disable-build-servers
+      - run: dotnet test --solution FocusRGB-Plugin-Steam.slnx -c Release --no-build
+      - name: Verify protocol conformance
+        shell: pwsh
+        run: |
+          dotnet publish src/FocusRgb.Plugin.Steam/FocusRgb.Plugin.Steam.csproj -c Release --no-build --no-self-contained -o build/conformance
+          python build/focusrgb-spec/sdk/conformance/plugin-conformance.py --plugin-id steam -- dotnet build/conformance/FocusRgb.Plugin.Steam.dll
+      - name: Stop build servers
+        if: always()
+        run: dotnet build-server shutdown
