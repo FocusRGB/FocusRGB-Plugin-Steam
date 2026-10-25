@@ -5,8 +5,9 @@ namespace FocusRgb.Plugin.Steam
     internal sealed class SteamCatalogReader(ISteamRootLocator rootLocator)
     {
         private const int MaximumLibraries = 64;
-        private const int MaximumManifestsPerLibrary = 4096;
+        private const int MaximumManifests = 4096;
         private const int MaximumExecutablesPerGame = 256;
+        private const int MaximumScanEntries = 10000;
         private const int MaximumManifestBytes = 2 * 1024 * 1024;
         private const int MaximumLibraryFileBytes = 4 * 1024 * 1024;
         private const int MaximumExecutableDepth = 8;
@@ -28,6 +29,7 @@ namespace FocusRgb.Plugin.Steam
             }
 
             var games = new Dictionary<string, PluginCatalogItem>(StringComparer.Ordinal);
+            var seenManifests = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var library in await ReadLibraryRootsAsync(steamRoot, cancellationToken).ConfigureAwait(false))
             {
                 var steamApps = Path.Combine(library, "steamapps");
@@ -36,7 +38,7 @@ namespace FocusRgb.Plugin.Steam
                 {
                     manifests = [.. Directory.EnumerateFiles(
                         steamApps, "appmanifest_*.acf", SearchOption.TopDirectoryOnly)
-                        .Take(MaximumManifestsPerLibrary)];
+                        .Take(MaximumManifests - seenManifests.Count)];
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
@@ -46,11 +48,20 @@ namespace FocusRgb.Plugin.Steam
                 foreach (var manifestPath in manifests)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    seenManifests.Add(manifestPath);
                     var game = await ReadGameAsync(steamApps, manifestPath, cancellationToken).ConfigureAwait(false);
                     if (game is not null)
                     {
                         games[game.ResourceId] = game;
                     }
+                }
+            }
+
+            lock (_cacheGate)
+            {
+                foreach (var removed in _cache.Keys.Except(seenManifests, StringComparer.OrdinalIgnoreCase).ToArray())
+                {
+                    _cache.Remove(removed);
                 }
             }
 
@@ -61,7 +72,8 @@ namespace FocusRgb.Plugin.Steam
         private bool TryGetSteamRoot(out string steamRoot)
         {
             steamRoot = rootLocator.FindSteamRoot() ?? string.Empty;
-            return steamRoot.Length > 0 && Directory.Exists(Path.Combine(steamRoot, "steamapps"));
+            return steamRoot.Length > 0 && !IsNetworkPath(steamRoot)
+                && Directory.Exists(Path.Combine(steamRoot, "steamapps"));
         }
 
         private static async Task<IReadOnlyList<string>> ReadLibraryRootsAsync(
@@ -173,6 +185,10 @@ namespace FocusRgb.Plugin.Steam
                 };
                 lock (_cacheGate)
                 {
+                    if (_cache.Count >= MaximumManifests)
+                    {
+                        _cache.Clear();
+                    }
                     _cache[manifestPath] = new CacheEntry(stamp, manifest.Length, DateTimeOffset.UtcNow, game);
                 }
                 return game;
@@ -199,13 +215,24 @@ namespace FocusRgb.Plugin.Steam
                     MatchCasing = MatchCasing.CaseInsensitive
                 };
                 var executables = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var path in Directory.EnumerateFiles(installDirectory, "*.exe", options))
+                foreach (var path in Directory.EnumerateFileSystemEntries(installDirectory, "*", options)
+                    .Take(MaximumScanEntries))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    if (!path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || Directory.Exists(path))
+                    {
+                        continue;
+                    }
                     var relative = Path.GetRelativePath(installDirectory, path);
-                    if (IsExcludedExecutable(relative)) continue;
+                    if (IsExcludedExecutable(relative))
+                    {
+                        continue;
+                    }
                     executables.Add(Path.GetFileName(path));
-                    if (executables.Count >= MaximumExecutablesPerGame) break;
+                    if (executables.Count >= MaximumExecutablesPerGame)
+                    {
+                        break;
+                    }
                 }
 
                 return [.. executables.Order(StringComparer.OrdinalIgnoreCase)];
@@ -230,7 +257,10 @@ namespace FocusRgb.Plugin.Steam
                 [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
                 StringSplitOptions.RemoveEmptyEntries);
             if (segments.Take(segments.Length - 1).Any(segment =>
-                ExcludedDirectories.Contains(segment, StringComparer.OrdinalIgnoreCase))) return true;
+                ExcludedDirectories.Contains(segment, StringComparer.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
             var name = Path.GetFileName(relativePath);
             return ExcludedExecutablePrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 || name.Equals("dxsetup.exe", StringComparison.OrdinalIgnoreCase)

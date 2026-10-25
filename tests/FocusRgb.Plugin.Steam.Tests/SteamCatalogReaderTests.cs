@@ -141,6 +141,28 @@ namespace FocusRgb.Plugin.Steam.Tests
             Assert.Empty(await reader.ReadAsync(TestContext.Current.CancellationToken));
         }
 
+        [Fact]
+        public async Task ReadAsync_ReusesUnchangedManifestAndInvalidatesChangedManifest()
+        {
+            var steamRoot = Path.Combine(_directory, "Steam");
+            var steamApps = Path.Combine(steamRoot, "steamapps");
+            CopyFixture("appmanifest_570.acf", steamApps);
+            var install = Path.Combine(steamApps, "common", "Synthetic Dota");
+            Touch(Path.Combine(install, "game.exe"));
+            var reader = new SteamCatalogReader(new StubLocator(steamRoot));
+            var original = Assert.Single(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            Touch(Path.Combine(install, "new-game.exe"));
+
+            var cached = Assert.Single(await reader.ReadAsync(TestContext.Current.CancellationToken));
+
+            Assert.Same(original, cached);
+            Assert.DoesNotContain("new-game.exe", cached.Game!.Executables);
+            await File.AppendAllTextAsync(Path.Combine(steamApps, "appmanifest_570.acf"),
+                "\n// changed", TestContext.Current.CancellationToken);
+            var refreshed = Assert.Single(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            Assert.Contains("new-game.exe", refreshed.Game!.Executables);
+        }
+
         public void Dispose()
         {
             if (Directory.Exists(_directory))
