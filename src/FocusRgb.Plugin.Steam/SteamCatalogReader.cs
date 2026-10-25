@@ -116,20 +116,18 @@ namespace FocusRgb.Plugin.Steam
                     return null;
                 }
 
-                var available = Directory.Exists(installDirectory);
+                var directoryExists = Directory.Exists(installDirectory);
+                var executables = directoryExists ? ReadExecutables(installDirectory, cancellationToken) : [];
+                var available = executables.Count > 0;
                 return new PluginCatalogItem
                 {
                     ResourceId = appId,
                     DisplayName = name,
                     Available = available,
-                    Reason = available ? null : new PluginReason
-                    {
-                        Code = "game-files-missing",
-                        Message = "Steam lists the game, but its installation directory is unavailable."
-                    },
+                    Reason = available ? null : MissingGameReason(directoryExists),
                     Game = new PluginGameCatalogMetadata
                     {
-                        Executables = available ? ReadExecutables(installDirectory, cancellationToken) : []
+                        Executables = executables
                     }
                 };
             }
@@ -175,5 +173,17 @@ namespace FocusRgb.Plugin.Steam
                 && relative != ".."
                 && !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal);
         }
+
+        private static PluginReason MissingGameReason(bool directoryExists) => directoryExists
+            ? new PluginReason
+            {
+                Code = "no-executables-found",
+                Message = "Steam lists the game, but no Windows executable was found in its installation directory."
+            }
+            : new PluginReason
+            {
+                Code = "game-files-missing",
+                Message = "Steam lists the game, but its installation directory is unavailable."
+            };
     }
 }

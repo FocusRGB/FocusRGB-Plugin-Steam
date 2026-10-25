@@ -1,3 +1,4 @@
+using System.Security;
 using Microsoft.Win32;
 
 namespace FocusRgb.Plugin.Steam
@@ -11,17 +12,40 @@ namespace FocusRgb.Plugin.Steam
     {
         public string? FindSteamRoot()
         {
-            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam");
-            var path = key?.GetValue("SteamPath") as string;
-            if (!string.IsNullOrWhiteSpace(path))
+            try
             {
-                return Path.GetFullPath(path);
+                using var key = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam");
+                return ResolveRoot(
+                    key?.GetValue("SteamPath") as string,
+                    key?.GetValue("SteamExe") as string);
             }
-
-            var executable = key?.GetValue("SteamExe") as string;
-            return string.IsNullOrWhiteSpace(executable)
-                ? null
-                : Path.GetDirectoryName(Path.GetFullPath(executable));
+            catch (Exception exception) when (IsLocalMetadataException(exception))
+            {
+                return null;
+            }
         }
+
+        internal static string? ResolveRoot(string? path, string? executable)
+        {
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    return Path.GetFullPath(path);
+                }
+
+                return string.IsNullOrWhiteSpace(executable)
+                    ? null
+                    : Path.GetDirectoryName(Path.GetFullPath(executable));
+            }
+            catch (Exception exception) when (IsLocalMetadataException(exception))
+            {
+                return null;
+            }
+        }
+
+        private static bool IsLocalMetadataException(Exception exception) =>
+            exception is ArgumentException or NotSupportedException or SecurityException
+                or IOException or UnauthorizedAccessException;
     }
 }

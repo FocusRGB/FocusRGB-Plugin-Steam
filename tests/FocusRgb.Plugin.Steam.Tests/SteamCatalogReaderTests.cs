@@ -53,6 +53,22 @@ namespace FocusRgb.Plugin.Steam.Tests
         }
 
         [Fact]
+        public async Task ReadAsync_ReturnsUnavailableGame_WhenInstallDirectoryHasNoExecutables()
+        {
+            var steamRoot = Path.Combine(_directory, "Steam");
+            CopyFixture("appmanifest_570.acf", Path.Combine(steamRoot, "steamapps"));
+            Directory.CreateDirectory(
+                Path.Combine(steamRoot, "steamapps", "common", "Synthetic Dota"));
+
+            var game = Assert.Single(await new SteamCatalogReader(new StubLocator(steamRoot))
+                .ReadAsync(TestContext.Current.CancellationToken));
+
+            Assert.False(game.Available);
+            Assert.Empty(game.Game!.Executables);
+            Assert.Equal("no-executables-found", game.Reason!.Code);
+        }
+
+        [Fact]
         public async Task ReadAsync_IgnoresMalformedAndEscapingManifests()
         {
             var steamApps = Path.Combine(_directory, "Steam", "steamapps");
