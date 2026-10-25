@@ -1,0 +1,6 @@
+build/
+graphify-out/
+bin/
+obj/
+TestResults/
+*.user
