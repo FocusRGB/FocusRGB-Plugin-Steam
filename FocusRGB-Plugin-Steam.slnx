@@ -1,0 +1,19 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path=".editorconfig" />
+    <File Path=".gitattributes" />
+    <File Path=".gitignore" />
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Packages.props" />
+    <File Path="global.json" />
+    <File Path="LICENSE" />
+    <File Path="NuGet.Config" />
+    <File Path="README.md" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/FocusRgb.Plugin.Steam/FocusRgb.Plugin.Steam.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FocusRgb.Plugin.Steam.Tests/FocusRgb.Plugin.Steam.Tests.csproj" />
+  </Folder>
+</Solution>
