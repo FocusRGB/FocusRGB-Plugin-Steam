@@ -3,13 +3,14 @@ using FocusRgb.PluginSdk;
 
 namespace FocusRgb.Plugin.Steam
 {
-    internal sealed class SteamPlugin : IFocusRgbPlugin
+    internal sealed class SteamPlugin : IFocusRgbPlugin, IDisposable
     {
         private readonly SteamCatalogReader _catalog;
 
-        public SteamPlugin(ISteamRootLocator rootLocator)
+        public SteamPlugin(ISteamRootLocator rootLocator, TimeSpan? scanBudget = null)
         {
-            _catalog = new SteamCatalogReader(rootLocator);
+            _catalog = new SteamCatalogReader(rootLocator, scanBudget,
+                Environment.GetEnvironmentVariable("FOCUSRGB_PLUGIN_DATA_DIRECTORY"));
         }
 
         public Task<InitializeResult> InitializeAsync(
@@ -47,11 +48,18 @@ namespace FocusRgb.Plugin.Steam
                 return Unsupported("Steam provides only an installed-game catalog.");
             }
 
+            var items = await _catalog.ReadAsync(cancellationToken).ConfigureAwait(false);
+            var incomplete = _catalog.IsScanIncomplete;
             return new PluginCatalogResult
             {
                 Support = "supported",
-                RefreshedAt = DateTimeOffset.UtcNow,
-                Items = await _catalog.ReadAsync(cancellationToken).ConfigureAwait(false)
+                RefreshedAt = incomplete ? null : DateTimeOffset.UtcNow,
+                Items = items,
+                Reason = incomplete ? new PluginReason
+                {
+                    Code = "catalog-scan-incomplete",
+                    Message = "Steam discovery is incomplete; showing cached or partial results while background scanning continues."
+                } : null
             };
         }
 
@@ -68,7 +76,13 @@ namespace FocusRgb.Plugin.Steam
             CancellationToken cancellationToken) =>
             Task.FromResult(new BindingReleaseResult { Outcome = "unsupported" });
 
-        public Task ShutdownAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task ShutdownAsync(CancellationToken cancellationToken)
+        {
+            Dispose();
+            return Task.CompletedTask;
+        }
+
+        public void Dispose() => _catalog.Dispose();
 
         private static PluginCatalogResult Unsupported(string message) => new()
         {

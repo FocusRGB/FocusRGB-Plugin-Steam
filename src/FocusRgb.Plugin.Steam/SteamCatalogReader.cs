@@ -1,8 +1,12 @@
+using System.Text.Json;
 using FocusRgb.Contracts;
 
 namespace FocusRgb.Plugin.Steam
 {
-    internal sealed class SteamCatalogReader(ISteamRootLocator rootLocator)
+    internal sealed class SteamCatalogReader(
+        ISteamRootLocator rootLocator,
+        TimeSpan? scanBudget = null,
+        string? dataDirectory = null) : IDisposable
     {
         private const int MaximumLibraries = 64;
         private const int MaximumManifests = 4096;
@@ -11,37 +15,132 @@ namespace FocusRgb.Plugin.Steam
         private const int MaximumManifestBytes = 2 * 1024 * 1024;
         private const int MaximumLibraryFileBytes = 4 * 1024 * 1024;
         private const int MaximumExecutableDepth = 8;
+        private const int MaximumCacheBytes = 16 * 1024 * 1024;
         private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(1);
         private static readonly string[] ExcludedDirectories =
             ["_CommonRedist", "redist", "redistributables", "installers", "support"];
         private static readonly string[] ExcludedExecutablePrefixes =
             ["unitycrashhandler", "crashreportclient", "crashpad_handler", "vc_redist", "vcredist", "dotnetfx", "ueprereqsetup", "installer", "easyanticheat", "beservice"];
         private readonly Dictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, PluginCatalogItem> _lastComplete = new(StringComparer.Ordinal);
         private readonly object _cacheGate = new();
+        private readonly object _scanGate = new();
+        private readonly CancellationTokenSource _lifetime = new();
+        private readonly TimeSpan _scanBudget = scanBudget ?? TimeSpan.FromSeconds(3);
+        private Task? _scanTask;
+        private bool _incomplete;
+        private bool _disposed;
+        private bool _persistedLoaded;
+        private bool _scanFailed;
+
+        public bool IsScanIncomplete => Volatile.Read(ref _incomplete);
 
         public bool IsInstalled => TryGetSteamRoot(out _);
 
         public async Task<IReadOnlyList<PluginCatalogItem>> ReadAsync(CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            Task scan;
+            lock (_scanGate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (_scanTask is null || _scanTask.IsCompleted)
+                {
+                    Volatile.Write(ref _incomplete, true);
+                    var lifetimeToken = _lifetime.Token;
+                    _scanTask = Task.Run(() => ScanInBackgroundAsync(lifetimeToken), CancellationToken.None);
+                }
+                scan = _scanTask;
+            }
+            try
+            {
+                // Filesystem calls can block without honoring cancellation; never block catalog/list with them.
+                await scan.WaitAsync(_scanBudget, cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
+            lock (_cacheGate)
+            {
+                var games = new Dictionary<string, PluginCatalogItem>(_lastComplete, StringComparer.Ordinal);
+                foreach (var entry in _cache.Values) games[entry.Game.ResourceId] = entry.Game;
+                return [.. games.Values.OrderBy(game => game.DisplayName, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(game => game.ResourceId, StringComparer.Ordinal)];
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_scanGate)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                _lifetime.Cancel();
+                _lifetime.Dispose();
+            }
+        }
+
+        private async Task ScanInBackgroundAsync(CancellationToken lifetimeToken)
+        {
+            try
+            {
+                if (!_persistedLoaded)
+                {
+                    await LoadPersistedCatalogAsync(lifetimeToken).ConfigureAwait(false);
+                    _persistedLoaded = true;
+                }
+                _scanFailed = false;
+                await ScanAsync(lifetimeToken).ConfigureAwait(false);
+                if (!_scanFailed)
+                {
+                    List<PluginCatalogItem> complete;
+                    lock (_cacheGate)
+                    {
+                        _lastComplete = _cache.Values.Select(entry => entry.Game)
+                            .GroupBy(game => game.ResourceId, StringComparer.Ordinal)
+                            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
+                        complete = [.. _lastComplete.Values];
+                    }
+                    await PersistCatalogAsync(complete, lifetimeToken).ConfigureAwait(false);
+                    Volatile.Write(ref _incomplete, false);
+                }
+            }
+            catch (OperationCanceledException) when (lifetimeToken.IsCancellationRequested)
+            {
+                // Shutdown is the only cancellation of shared scanning; callers cancel their own waits.
+            }
+        }
+
+        private async Task ScanAsync(CancellationToken cancellationToken)
+        {
             if (!TryGetSteamRoot(out var steamRoot))
             {
-                return [];
+                cancellationToken.ThrowIfCancellationRequested();
+                _scanFailed = true;
+                return;
             }
 
-            var games = new Dictionary<string, PluginCatalogItem>(StringComparer.Ordinal);
             var seenManifests = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var library in await ReadLibraryRootsAsync(steamRoot, cancellationToken).ConfigureAwait(false))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var steamApps = Path.Combine(library, "steamapps");
                 string[] manifests;
                 try
                 {
                     manifests = [.. Directory.EnumerateFiles(
                         steamApps, "appmanifest_*.acf", SearchOption.TopDirectoryOnly)
-                        .Take(MaximumManifests - seenManifests.Count)];
+                        .Select(path => { cancellationToken.ThrowIfCancellationRequested(); return path; })
+                        .Take(MaximumManifests - seenManifests.Count + 1)];
+                    if (manifests.Length > MaximumManifests - seenManifests.Count)
+                    {
+                        _scanFailed = true;
+                        manifests = [.. manifests.Take(MaximumManifests - seenManifests.Count)];
+                    }
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
                 {
+                    _scanFailed = true;
                     continue;
                 }
 
@@ -50,14 +149,15 @@ namespace FocusRgb.Plugin.Steam
                     cancellationToken.ThrowIfCancellationRequested();
                     seenManifests.Add(manifestPath);
                     var game = await ReadGameAsync(steamApps, manifestPath, cancellationToken).ConfigureAwait(false);
-                    if (game is not null)
+                    if (game is null)
                     {
-                        games[game.ResourceId] = game;
+                        if (!_scanFailed) { lock (_cacheGate) _cache.Remove(manifestPath); }
                     }
                 }
             }
 
-            lock (_cacheGate)
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_scanFailed) lock (_cacheGate)
             {
                 foreach (var removed in _cache.Keys.Except(seenManifests, StringComparer.OrdinalIgnoreCase).ToArray())
                 {
@@ -65,8 +165,6 @@ namespace FocusRgb.Plugin.Steam
                 }
             }
 
-            return [.. games.Values.OrderBy(game => game.DisplayName, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(game => game.ResourceId, StringComparer.Ordinal)];
         }
 
         private bool TryGetSteamRoot(out string steamRoot)
@@ -76,7 +174,7 @@ namespace FocusRgb.Plugin.Steam
                 && Directory.Exists(Path.Combine(steamRoot, "steamapps"));
         }
 
-        private static async Task<IReadOnlyList<string>> ReadLibraryRootsAsync(
+        private async Task<IReadOnlyList<string>> ReadLibraryRootsAsync(
             string steamRoot,
             CancellationToken cancellationToken)
         {
@@ -94,11 +192,13 @@ namespace FocusRgb.Plugin.Steam
                 var libraries = document.GetObject("libraryfolders");
                 if (libraries is null)
                 {
+                    _scanFailed = true;
                     return [.. roots];
                 }
 
                 foreach (var entry in libraries.Values)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var libraryPath = entry.Value switch
                     {
                         string value => value,
@@ -108,9 +208,10 @@ namespace FocusRgb.Plugin.Steam
                     if (!string.IsNullOrWhiteSpace(libraryPath))
                     {
                         var fullPath = Path.GetFullPath(libraryPath);
-                        if (!IsNetworkPath(fullPath) && roots.Count < MaximumLibraries)
+                        if (!IsNetworkPath(fullPath) && !roots.Contains(fullPath))
                         {
-                            roots.Add(fullPath);
+                            if (roots.Count < MaximumLibraries) roots.Add(fullPath);
+                            else _scanFailed = true;
                         }
                     }
                 }
@@ -118,6 +219,7 @@ namespace FocusRgb.Plugin.Steam
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
                 or ArgumentException or NotSupportedException or FormatException)
             {
+                _scanFailed = true;
             }
 
             return [.. roots];
@@ -172,6 +274,7 @@ namespace FocusRgb.Plugin.Steam
                 var directoryExists = Directory.Exists(installDirectory);
                 var executables = directoryExists ? ReadExecutables(installDirectory, cancellationToken) : [];
                 var available = executables.Count > 0;
+                cancellationToken.ThrowIfCancellationRequested();
                 var game = new PluginCatalogItem
                 {
                     ResourceId = appId,
@@ -187,7 +290,7 @@ namespace FocusRgb.Plugin.Steam
                 {
                     if (_cache.Count >= MaximumManifests)
                     {
-                        _cache.Clear();
+                        _cache.Remove(_cache.MinBy(entry => entry.Value.CachedAt).Key);
                     }
                     _cache[manifestPath] = new CacheEntry(stamp, manifest.Length, DateTimeOffset.UtcNow, game);
                 }
@@ -196,6 +299,7 @@ namespace FocusRgb.Plugin.Steam
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException
                 or ArgumentException or NotSupportedException or FormatException)
             {
+                _scanFailed = true;
                 return null;
             }
         }
@@ -310,6 +414,68 @@ namespace FocusRgb.Plugin.Steam
                 Code = "game-files-missing",
                 Message = "Steam lists the game, but its installation directory is unavailable."
             };
+
+        private async Task LoadPersistedCatalogAsync(CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(dataDirectory)) return;
+            try
+            {
+                var path = Path.Combine(dataDirectory, "catalog-cache.json");
+                if (!File.Exists(path) || new FileInfo(path).Length > MaximumCacheBytes) return;
+                var saved = JsonSerializer.Deserialize<PersistedCatalog>(
+                    await ReadBoundedTextAsync(path, MaximumCacheBytes, cancellationToken).ConfigureAwait(false), PluginJson.Options);
+                if (saved?.SchemaVersion != 1 || saved.Items is null || saved.Items.Count > MaximumManifests
+                    || saved.Items.Any(item => !IsValidCachedGame(item))
+                    || saved.Items.Select(item => item.ResourceId).Distinct(StringComparer.Ordinal).Count() != saved.Items.Count) return;
+                lock (_cacheGate)
+                    _lastComplete = saved.Items.ToDictionary(item => item.ResourceId, StringComparer.Ordinal);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or FormatException)
+            {
+                // A disposable cache must never prevent discovery or expose unvalidated data.
+            }
+        }
+
+        private async Task PersistCatalogAsync(List<PluginCatalogItem> games, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(dataDirectory)) return;
+            var path = Path.Combine(dataDirectory, "catalog-cache.json");
+            var temporary = path + ".tmp";
+            try
+            {
+                var bytes = JsonSerializer.SerializeToUtf8Bytes(new PersistedCatalog { SchemaVersion = 1, Items = games }, PluginJson.Options);
+                if (bytes.Length > MaximumCacheBytes) return;
+                Directory.CreateDirectory(dataDirectory);
+                await File.WriteAllBytesAsync(temporary, bytes, cancellationToken).ConfigureAwait(false);
+                File.Move(temporary, path, overwrite: true);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Console.Error.WriteLine("The completed Steam catalog could not be cached for the next startup.");
+            }
+            finally
+            {
+                try { File.Delete(temporary); }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+            }
+        }
+
+        private static bool IsValidCachedGame(PluginCatalogItem? game) => game is not null
+            && !string.IsNullOrWhiteSpace(game.ResourceId) && game.ResourceId.Length <= 128
+            && game.ResourceId.All(char.IsAsciiDigit)
+            && !string.IsNullOrWhiteSpace(game.DisplayName) && game.DisplayName.Length <= 128
+            && !game.DisplayName.Any(char.IsControl)
+            && game.Game?.Executables is { Count: <= MaximumExecutablesPerGame } executables
+            && executables.Distinct(StringComparer.OrdinalIgnoreCase).Count() == executables.Count
+            && executables.All(name => !string.IsNullOrWhiteSpace(name) && name.Length <= 260
+                && !name.Any(char.IsControl) && !name.Contains('/') && !name.Contains('\\')
+                && name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase));
+
+        private sealed class PersistedCatalog
+        {
+            public int SchemaVersion { get; init; }
+            public List<PluginCatalogItem>? Items { get; init; }
+        }
 
         private sealed record CacheEntry(
             long LastWriteTicks,

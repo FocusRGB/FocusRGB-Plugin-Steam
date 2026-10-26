@@ -63,6 +63,33 @@ namespace FocusRgb.Plugin.Steam.Tests
             Assert.Equal("unsupported", released.Outcome);
         }
 
+        [Fact]
+        public async Task ListCatalogAsync_ReportsIncompleteWithoutFreshTimestamp_WhenDiskScanIsBlocked()
+        {
+            var release = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var plugin = new SteamPlugin(new BlockingLocator(release.Task), TimeSpan.FromMilliseconds(100));
+            try
+            {
+                var catalog = await plugin.ListCatalogAsync(
+                    new CatalogListParameters { Kind = "game" }, TestContext.Current.CancellationToken);
+
+                Assert.Equal("supported", catalog.Support);
+                Assert.Empty(catalog.Items);
+                Assert.Null(catalog.RefreshedAt);
+                Assert.Equal("catalog-scan-incomplete", catalog.Reason!.Code);
+            }
+            finally
+            {
+                await plugin.ShutdownAsync(TestContext.Current.CancellationToken);
+                release.TrySetResult(null);
+            }
+        }
+
+        private sealed class BlockingLocator(Task<string?> result) : ISteamRootLocator
+        {
+            public string? FindSteamRoot() => result.GetAwaiter().GetResult();
+        }
+
         private sealed class StubLocator(string? path) : ISteamRootLocator
         {
             public string? FindSteamRoot() => path;
