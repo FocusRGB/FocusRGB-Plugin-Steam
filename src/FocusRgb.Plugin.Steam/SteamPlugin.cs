@@ -9,7 +9,8 @@ namespace FocusRgb.Plugin.Steam
 
         public SteamPlugin(ISteamRootLocator rootLocator, TimeSpan? scanBudget = null)
         {
-            _catalog = new SteamCatalogReader(rootLocator, scanBudget);
+            _catalog = new SteamCatalogReader(rootLocator, scanBudget,
+                Environment.GetEnvironmentVariable("FOCUSRGB_PLUGIN_DATA_DIRECTORY"));
         }
 
         public Task<InitializeResult> InitializeAsync(
@@ -57,7 +58,7 @@ namespace FocusRgb.Plugin.Steam
                 Reason = incomplete ? new PluginReason
                 {
                     Code = "catalog-scan-incomplete",
-                    Message = "Steam scan reached its time budget; showing cached or partial results. Refresh to continue."
+                    Message = "Steam discovery is incomplete; showing cached or partial results while background scanning continues."
                 } : null
             };
         }
