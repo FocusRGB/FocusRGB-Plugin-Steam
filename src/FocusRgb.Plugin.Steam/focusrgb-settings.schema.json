@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "description": "Optional local Steam paths. Leave defaults empty to use automatic detection and libraryfolders.vdf. Paths must contain steamapps; network and relative paths are rejected. Restart after saving.",
+  "fields": [
+    {
+      "id": "steamRoot",
+      "displayName": "Steam installation folder",
+      "description": "Optional absolute local Steam folder. Empty uses automatic detection.",
+      "type": "string",
+      "default": ""
+    },
+    {
+      "id": "extraLibraryFolders",
+      "displayName": "Extra Steam library folders",
+      "description": "JSON array of absolute local library folders, for example [\"D:/SteamLibrary\"]. At most 64 libraries are scanned in total, including detected libraries.",
+      "type": "json",
+      "default": []
+    }
+  ]
+}

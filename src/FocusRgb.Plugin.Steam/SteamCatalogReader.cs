@@ -6,9 +6,10 @@ namespace FocusRgb.Plugin.Steam
     internal sealed class SteamCatalogReader(
         ISteamRootLocator rootLocator,
         TimeSpan? scanBudget = null,
-        string? dataDirectory = null) : IDisposable
+        string? dataDirectory = null,
+        IReadOnlyList<string>? extraLibraryFolders = null) : IDisposable
     {
-        private const int MaximumLibraries = 64;
+        internal const int MaximumLibraries = 64;
         private const int MaximumManifests = 4096;
         private const int MaximumExecutablesPerGame = 256;
         private const int MaximumScanEntries = 10000;
@@ -170,8 +171,11 @@ namespace FocusRgb.Plugin.Steam
         private bool TryGetSteamRoot(out string steamRoot)
         {
             steamRoot = rootLocator.FindSteamRoot() ?? string.Empty;
-            return steamRoot.Length > 0 && !IsNetworkPath(steamRoot)
-                && Directory.Exists(Path.Combine(steamRoot, "steamapps"));
+            if (steamRoot.Length > 0 && !IsNetworkPath(steamRoot)
+                && Directory.Exists(Path.Combine(steamRoot, "steamapps"))) return true;
+            steamRoot = extraLibraryFolders?.FirstOrDefault(path => !IsNetworkPath(path)
+                && Directory.Exists(Path.Combine(path, "steamapps"))) ?? string.Empty;
+            return steamRoot.Length > 0;
         }
 
         private async Task<IReadOnlyList<string>> ReadLibraryRootsAsync(
@@ -179,6 +183,15 @@ namespace FocusRgb.Plugin.Steam
             CancellationToken cancellationToken)
         {
             var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Path.GetFullPath(steamRoot) };
+            foreach (var extra in extraLibraryFolders ?? [])
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var fullPath = Path.GetFullPath(extra);
+                if (IsNetworkPath(fullPath)) { _scanFailed = true; continue; }
+                if (roots.Contains(fullPath)) continue;
+                if (roots.Count < MaximumLibraries) roots.Add(fullPath);
+                else _scanFailed = true;
+            }
             var path = Path.Combine(steamRoot, "steamapps", "libraryfolders.vdf");
             if (!File.Exists(path))
             {
@@ -373,7 +386,7 @@ namespace FocusRgb.Plugin.Steam
                 || name.StartsWith("unins", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool IsNetworkPath(string path)
+        internal static bool IsNetworkPath(string path)
         {
             if (new Uri(path).IsUnc) return true;
             try
