@@ -6,11 +6,15 @@ namespace FocusRgb.Plugin.Steam
     internal sealed class SteamPlugin : IFocusRgbPlugin, IDisposable
     {
         private readonly SteamCatalogReader _catalog;
+        private readonly string? _configurationError;
 
-        public SteamPlugin(ISteamRootLocator rootLocator, TimeSpan? scanBudget = null)
+        public SteamPlugin(ISteamRootLocator rootLocator, TimeSpan? scanBudget = null, string? dataDirectory = null)
         {
-            _catalog = new SteamCatalogReader(rootLocator, scanBudget,
-                Environment.GetEnvironmentVariable("FOCUSRGB_PLUGIN_DATA_DIRECTORY"));
+            dataDirectory ??= Environment.GetEnvironmentVariable("FOCUSRGB_PLUGIN_DATA_DIRECTORY");
+            var settings = SteamLibrarySettings.Load(dataDirectory);
+            _configurationError = settings.Error;
+            _catalog = new SteamCatalogReader(new ConfiguredRootLocator(rootLocator, settings.SteamRoot), scanBudget,
+                dataDirectory, settings.ExtraLibraryFolders);
         }
 
         public Task<InitializeResult> InitializeAsync(
@@ -22,12 +26,18 @@ namespace FocusRgb.Plugin.Steam
                 ContractVersion = ContractVersion.Current,
                 Capabilities =
                 [
-                    new PluginCapability { Id = "game.catalog", Support = "supported" }
+                    new PluginCapability
+                    {
+                        Id = "game.catalog", Support = _configurationError is null ? "supported" : "unsupported",
+                        Reason = _configurationError is null ? null : UnsupportedReason(_configurationError)
+                    }
                 ]
             });
 
         public Task<PluginStatusResult> GetStatusAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(_catalog.IsInstalled
+            Task.FromResult(_configurationError is not null
+                ? new PluginStatusResult { Availability = "unavailable", Reason = UnsupportedReason(_configurationError) }
+                : _catalog.IsInstalled
                 ? new PluginStatusResult { Availability = "available" }
                 : new PluginStatusResult
                 {
@@ -43,6 +53,7 @@ namespace FocusRgb.Plugin.Steam
             CatalogListParameters parameters,
             CancellationToken cancellationToken)
         {
+            if (_configurationError is not null) return Unsupported(_configurationError);
             if (!string.Equals(parameters.Kind, "game", StringComparison.Ordinal))
             {
                 return Unsupported("Steam provides only an installed-game catalog.");
@@ -83,6 +94,11 @@ namespace FocusRgb.Plugin.Steam
         }
 
         public void Dispose() => _catalog.Dispose();
+
+        private sealed class ConfiguredRootLocator(ISteamRootLocator fallback, string? configured) : ISteamRootLocator
+        {
+            public string? FindSteamRoot() => configured ?? fallback.FindSteamRoot();
+        }
 
         private static PluginCatalogResult Unsupported(string message) => new()
         {
