@@ -19,6 +19,20 @@ Cancellation stops waiting immediately, and plugin shutdown cancels the shared s
 filesystem call cannot be forcibly interrupted, but it never spawns duplicate scans or holds up
 a catalog response beyond its budget.
 
+## Optional paths
+
+Configure the plugin from FocusRGB's Plugins tab. `steamRoot` overrides automatic detection;
+`extraLibraryFolders` is a JSON array of additional library roots. Both default to empty, leaving
+automatic detection and `libraryfolders.vdf` unchanged. Each path must be absolute, local,
+accessible and contain `steamapps`; UNC/network and relative paths are rejected. Duplicates are
+removed case-insensitively. A scan still reads at most 64 combined libraries and 4096 manifests,
+with the three-second response budget and persisted cache described above.
+
+Settings live in `settings.json` under `FOCUSRGB_PLUGIN_DATA_DIRECTORY`, outside the package.
+Saving in the host restarts the plugin; invalid settings disable discovery with a Configure
+message rather than crashing or reading arbitrary paths. The shipped settings schema requires
+a host supporting camelCase setting IDs ([host compatibility PR #144](https://github.com/FocusRGB/FocusRGB/pull/144)).
+
 ## Build and test
 
 `FocusRgb.PluginSdk` 1.2.0 restores from nuget.org without repository credentials:
