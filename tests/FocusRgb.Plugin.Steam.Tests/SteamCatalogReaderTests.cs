@@ -248,6 +248,90 @@ namespace FocusRgb.Plugin.Steam.Tests
             Assert.False(reader.IsScanIncomplete);
         }
 
+        [Fact]
+        public async Task ReadAsync_ColdStartReturnsPersistedFullCatalog_WhileSlowScanContinuesWithoutAnotherRequest()
+        {
+            var steamRoot = Path.Combine(_directory, "Steam");
+            var steamApps = Path.Combine(steamRoot, "steamapps");
+            CopyFixture("appmanifest_570.acf", steamApps);
+            CopyFixture("appmanifest_730.acf", steamApps);
+            var data = Path.Combine(_directory, "plugin-data");
+            using (var first = new SteamCatalogReader(new StubLocator(steamRoot), dataDirectory: data))
+            {
+                Assert.Equal(2, (await first.ReadAsync(TestContext.Current.CancellationToken)).Count);
+                Assert.False(first.IsScanIncomplete);
+            }
+            var persistedPath = Path.Combine(data, "catalog-cache.json");
+            Assert.True(File.Exists(persistedPath));
+            File.Delete(Path.Combine(steamApps, "appmanifest_730.acf"));
+            using var locator = new BlockingLocator(steamRoot);
+            using var restarted = new SteamCatalogReader(locator, TimeSpan.FromMilliseconds(100), data);
+            try
+            {
+                var cold = await restarted.ReadAsync(TestContext.Current.CancellationToken);
+
+                Assert.Equal(["570", "730"], cold.Select(game => game.ResourceId).Order());
+                Assert.True(restarted.IsScanIncomplete);
+                Assert.Equal(1, locator.Calls);
+                locator.Release.Set();
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(5));
+                while (restarted.IsScanIncomplete) await Task.Delay(10, timeout.Token);
+
+                // No second request triggered completion: the background scan reconciled and saved removals.
+                using var saved = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(
+                    persistedPath, TestContext.Current.CancellationToken));
+                Assert.Equal("570", Assert.Single(saved.RootElement.GetProperty("items").EnumerateArray())
+                    .GetProperty("resourceId").GetString());
+                var complete = await restarted.ReadAsync(TestContext.Current.CancellationToken);
+                Assert.Equal("570", Assert.Single(complete).ResourceId);
+            }
+            finally
+            {
+                restarted.Dispose();
+                locator.Release.Set();
+            }
+        }
+
+        [Theory]
+        [InlineData("{broken")]
+        [InlineData("{\"schemaVersion\":1,\"items\":[null]}")]
+        [InlineData("{\"schemaVersion\":1,\"items\":[{\"resourceId\":\"570\",\"displayName\":\"Game\",\"available\":true,\"game\":{\"executables\":[\"C:/private/game.exe\"]}}]}")]
+        public async Task ReadAsync_IgnoresInvalidPersistedCatalogWithoutFailingDiscovery(string json)
+        {
+            var data = Path.Combine(_directory, "plugin-data");
+            Directory.CreateDirectory(data);
+            await File.WriteAllTextAsync(Path.Combine(data, "catalog-cache.json"), json, TestContext.Current.CancellationToken);
+            using var locator = new BlockingLocator(null);
+            using var reader = new SteamCatalogReader(locator, TimeSpan.FromMilliseconds(100), data);
+            try
+            {
+                Assert.Empty(await reader.ReadAsync(TestContext.Current.CancellationToken));
+            }
+            finally
+            {
+                reader.Dispose();
+                locator.Release.Set();
+            }
+        }
+
+        [Fact]
+        public async Task ReadAsync_RetainsPersistedGames_WhenLibraryMetadataCannotBeRead()
+        {
+            var steamRoot = Path.Combine(_directory, "Steam");
+            var steamApps = Path.Combine(steamRoot, "steamapps");
+            CopyFixture("appmanifest_570.acf", steamApps);
+            var data = Path.Combine(_directory, "plugin-data");
+            using (var first = new SteamCatalogReader(new StubLocator(steamRoot), dataDirectory: data))
+                Assert.Single(await first.ReadAsync(TestContext.Current.CancellationToken));
+            File.Delete(Path.Combine(steamApps, "appmanifest_570.acf"));
+            File.WriteAllText(Path.Combine(steamApps, "libraryfolders.vdf"), "{broken");
+            using var restarted = new SteamCatalogReader(new StubLocator(steamRoot), dataDirectory: data);
+
+            Assert.Single(await restarted.ReadAsync(TestContext.Current.CancellationToken));
+            Assert.True(restarted.IsScanIncomplete);
+        }
+
         public void Dispose()
         {
             if (Directory.Exists(_directory))
