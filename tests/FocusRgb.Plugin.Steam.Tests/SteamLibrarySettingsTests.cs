@@ -8,6 +8,39 @@ namespace FocusRgb.Plugin.Steam.Tests
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "focusrgb-steam-settings-" + Guid.NewGuid().ToString("N"));
 
         [Fact]
+        public async Task Plugin_ExposesDetectedDefaultsWithoutWritingSavedSettings()
+        {
+            var root = Library("Detected", "570", "Example");
+            var data = Path.Combine(_directory, "data");
+            using var plugin = new SteamPlugin(new FixedLocator(root), dataDirectory: data);
+            await plugin.GetStatusAsync(TestContext.Current.CancellationToken);
+            using var defaults = JsonDocument.Parse(File.ReadAllText(Path.Combine(data, "defaults.json")));
+            Assert.Equal(root, defaults.RootElement.GetProperty("steamRoot").GetString());
+            Assert.Empty(defaults.RootElement.GetProperty("extraLibraryFolders").EnumerateArray());
+            Assert.False(File.Exists(Path.Combine(data, "settings.json")));
+            Assert.Empty(Directory.GetFiles(data, "*.tmp"));
+        }
+
+        [Fact]
+        public async Task DetectedDefaults_PreserveExplicitValuesAndFailNonFatally()
+        {
+            var root = Library("Detected", "570", "Example");
+            var path = Path.Combine(_directory, "settings.json");
+            const string original = "{\"steamRoot\":\"\",\"extraLibraryFolders\":[]}";
+            File.WriteAllText(path, original);
+            using var plugin = new SteamPlugin(new FixedLocator(root), dataDirectory: _directory);
+            await plugin.GetStatusAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(original, File.ReadAllText(path));
+            SteamLibrarySettings.WriteDetectedDefaults(path, root);
+            Assert.Equal(original, File.ReadAllText(path));
+        }
+
+        private sealed class FixedLocator(string root) : ISteamRootLocator
+        {
+            public string? FindSteamRoot() => root;
+        }
+
+        [Fact]
         public void Load_EmptyDefaultsKeepAutomaticDetection()
         {
             var settings = SteamLibrarySettings.Load(_directory);
@@ -97,6 +130,8 @@ namespace FocusRgb.Plugin.Steam.Tests
             using var schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "focusrgb-settings.schema.json")));
             Assert.Equal(1, schema.RootElement.GetProperty("schemaVersion").GetInt32());
             var fields = schema.RootElement.GetProperty("fields").EnumerateArray().ToDictionary(field => field.GetProperty("id").GetString()!);
+            Assert.Equal("directory", fields["steamRoot"].GetProperty("format").GetString());
+            Assert.Equal("directory-list", fields["extraLibraryFolders"].GetProperty("format").GetString());
             Assert.Equal("string", fields["steamRoot"].GetProperty("type").GetString());
             Assert.Equal("", fields["steamRoot"].GetProperty("default").GetString());
             Assert.Equal("json", fields["extraLibraryFolders"].GetProperty("type").GetString());
