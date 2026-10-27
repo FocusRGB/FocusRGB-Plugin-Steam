@@ -7,13 +7,15 @@
       "displayName": "Steam installation folder",
       "description": "Optional absolute local Steam folder. Empty uses automatic detection.",
       "type": "string",
+      "format": "directory",
       "default": ""
     },
     {
       "id": "extraLibraryFolders",
       "displayName": "Extra Steam library folders",
-      "description": "JSON array of absolute local library folders, for example [\"D:/SteamLibrary\"]. At most 64 libraries are scanned in total, including detected libraries.",
+      "description": "Choose additional local folders containing steamapps. At most 64 libraries are scanned in total, including detected libraries.",
       "type": "json",
+      "format": "directory-list",
       "default": []
     }
   ]
