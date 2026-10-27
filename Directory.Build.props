@@ -10,7 +10,7 @@
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
     <PathMap Condition="'$(ContinuousIntegrationBuild)' == 'true'">$(MSBuildThisFileDirectory)=/_/,$(ArtifactsPath)=/_/artifacts/</PathMap>
-    <Version>1.0.0</Version>
+    <Version>0.1.0</Version>
     <Authors>Amin Javan</Authors>
     <Company>Devantix</Company>
     <Copyright>Copyright (c) 2026 Devantix</Copyright>
