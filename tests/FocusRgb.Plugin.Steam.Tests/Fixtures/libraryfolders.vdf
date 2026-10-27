@@ -1,0 +1,19 @@
+"libraryfolders"
+{
+    "0"
+    {
+        "path" "__STEAM_ROOT__"
+        "apps"
+        {
+            "570" "1"
+        }
+    }
+    "1"
+    {
+        "path" "__SECOND_LIBRARY__"
+        "apps"
+        {
+            "730" "1"
+        }
+    }
+}

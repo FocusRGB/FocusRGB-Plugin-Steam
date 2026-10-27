@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>FocusRgb.Plugin.Steam</AssemblyName>
+    <RootNamespace>FocusRgb.Plugin.Steam</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="FocusRgb.PluginSdk" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="FocusRgb.Plugin.Steam.Tests" />
+    <None Update="focusrgb-settings.schema.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "steam",
+  "version": "0.1.0",
+  "contractVersion": "1.2",
+  "entryPoint": "FocusRgb.Plugin.Steam.dll",
+  "operatingSystems": ["windows"],
+  "architectures": ["x64", "arm64"],
+  "roles": ["integration"],
+  "resources": ["filesystem.read"],
+  "license": "MIT",
+  "source": "https://github.com/FocusRGB/FocusRGB-Plugin-Steam"
+}
