@@ -53,6 +53,38 @@ namespace FocusRgb.Plugin.Steam
             }
         }
 
+        public static void WriteDetectedDefaults(string? dataDirectory, string? detectedRoot)
+        {
+            if (string.IsNullOrWhiteSpace(dataDirectory)) return;
+            try
+            {
+                var root = "";
+                if (!string.IsNullOrWhiteSpace(detectedRoot))
+                {
+                    try { root = NormalizeLibrary(detectedRoot); }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException
+                        or ArgumentException or NotSupportedException or FormatException) { }
+                }
+                Directory.CreateDirectory(dataDirectory);
+                var path = Path.Combine(dataDirectory, "defaults.json");
+                var temporary = path + ".tmp";
+                try
+                {
+                    File.WriteAllText(temporary, JsonSerializer.Serialize(new { steamRoot = root, extraLibraryFolders = Array.Empty<string>() }));
+                    File.Move(temporary, path, true);
+                }
+                finally
+                {
+                    if (File.Exists(temporary)) File.Delete(temporary);
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException
+                or ArgumentException or NotSupportedException)
+            {
+                // Display defaults are optional; failure must not disable discovery or modify saved settings.
+            }
+        }
+
         private static string NormalizeLibrary(string value)
         {
             if (value.Length > 4096 || !Path.IsPathFullyQualified(value) || value.Any(char.IsControl)

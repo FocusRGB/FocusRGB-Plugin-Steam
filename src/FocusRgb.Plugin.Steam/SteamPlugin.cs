@@ -13,7 +13,7 @@ namespace FocusRgb.Plugin.Steam
             dataDirectory ??= Environment.GetEnvironmentVariable("FOCUSRGB_PLUGIN_DATA_DIRECTORY");
             var settings = SteamLibrarySettings.Load(dataDirectory);
             _configurationError = settings.Error;
-            _catalog = new SteamCatalogReader(new ConfiguredRootLocator(rootLocator, settings.SteamRoot), scanBudget,
+            _catalog = new SteamCatalogReader(new ConfiguredRootLocator(rootLocator, settings.SteamRoot, dataDirectory), scanBudget,
                 dataDirectory, settings.ExtraLibraryFolders);
         }
 
@@ -95,9 +95,19 @@ namespace FocusRgb.Plugin.Steam
 
         public void Dispose() => _catalog.Dispose();
 
-        private sealed class ConfiguredRootLocator(ISteamRootLocator fallback, string? configured) : ISteamRootLocator
+        private sealed class ConfiguredRootLocator(ISteamRootLocator fallback, string? configured, string? dataDirectory) : ISteamRootLocator
         {
-            public string? FindSteamRoot() => configured ?? fallback.FindSteamRoot();
+            private int _defaultsWritten;
+
+            public string? FindSteamRoot()
+            {
+                var root = configured ?? fallback.FindSteamRoot();
+                if (Interlocked.Exchange(ref _defaultsWritten, 1) == 0)
+                {
+                    SteamLibrarySettings.WriteDetectedDefaults(dataDirectory, configured is null ? root : null);
+                }
+                return root;
+            }
         }
 
         private static PluginCatalogResult Unsupported(string message) => new()
