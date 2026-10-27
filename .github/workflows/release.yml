@@ -83,3 +83,4 @@ jobs:
             build/focusrgb-plugin.json
             build/SHA256SUMS
           generate_release_notes: true
+          prerelease: true
