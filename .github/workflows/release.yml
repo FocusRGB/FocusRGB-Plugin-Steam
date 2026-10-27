@@ -23,6 +23,27 @@ jobs:
       PACKAGE_SUFFIX: ${{ github.event_name == 'push' && github.ref_name || format('dry-run-{0}', github.run_number) }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Validate release tag
+        if: github.event_name == 'push'
+        shell: pwsh
+        env:
+          RELEASE_REF: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_REF -notmatch '^v([0-9]+\.[0-9]+\.[0-9]+)$') {
+            throw "Release tags must use vMAJOR.MINOR.PATCH."
+          }
+          $tagVersion = $Matches[1]
+          $manifest = Get-Content src/FocusRgb.Plugin.Steam/focusrgb-plugin.json -Raw | ConvertFrom-Json
+          if ($manifest.version -ne $tagVersion) {
+            throw "Plugin manifest version must equal tag version $tagVersion."
+          }
+          git fetch origin --no-tags "+refs/heads/main:refs/remotes/origin/main"
+          if ($LASTEXITCODE -ne 0) { throw "Could not refresh main history." }
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) { throw "Release commits must belong to main history." }
+          exit 0
       - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
