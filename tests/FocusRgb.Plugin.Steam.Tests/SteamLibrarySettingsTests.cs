@@ -16,7 +16,7 @@ namespace FocusRgb.Plugin.Steam.Tests
             await plugin.GetStatusAsync(TestContext.Current.CancellationToken);
             using var defaults = JsonDocument.Parse(File.ReadAllText(Path.Combine(data, "defaults.json")));
             Assert.Equal(root, defaults.RootElement.GetProperty("steamRoot").GetString());
-            Assert.Empty(defaults.RootElement.GetProperty("extraLibraryFolders").EnumerateArray());
+            Assert.Equal(root, Assert.Single(defaults.RootElement.GetProperty("extraLibraryFolders").EnumerateArray()).GetString());
             Assert.False(File.Exists(Path.Combine(data, "settings.json")));
             Assert.Empty(Directory.GetFiles(data, "*.tmp"));
         }
@@ -38,6 +38,40 @@ namespace FocusRgb.Plugin.Steam.Tests
         private sealed class FixedLocator(string root) : ISteamRootLocator
         {
             public string? FindSteamRoot() => root;
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void DetectedDefaults_IncludeDeduplicatedModernAndLegacyLibraries(bool modern)
+        {
+            var root = Library("Root", "1", "First");
+            var extra = Library("Extra", "2", "Second");
+            var path = JsonSerializer.Serialize(extra);
+            var value = modern ? "{ \"path\" " + path + " }" : path;
+            File.WriteAllText(Path.Combine(root, "steamapps", "libraryfolders.vdf"),
+                "\"libraryfolders\" { \"0\" " + value + " \"1\" " + value + " \"2\" \"relative\" }");
+            SteamLibrarySettings.WriteDetectedDefaults(_directory, root);
+            using var defaults = JsonDocument.Parse(File.ReadAllText(Path.Combine(_directory, "defaults.json")));
+            var folders = defaults.RootElement.GetProperty("extraLibraryFolders").EnumerateArray().Select(item => item.GetString()).ToArray();
+            Assert.Equal(new[] { root, extra }, folders);
+            File.Copy(Path.Combine(_directory, "defaults.json"), Path.Combine(_directory, "settings.json"));
+            var settings = SteamLibrarySettings.Load(_directory);
+            Assert.Null(settings.Error);
+            Assert.Equal(root, settings.SteamRoot);
+            Assert.Equal(new[] { root, extra }, settings.ExtraLibraryFolders);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void DetectedDefaults_KeepRootWhenLibraryFileIsMalformedOrOversized(bool oversized)
+        {
+            var root = Library("Root", "1", "First");
+            File.WriteAllText(Path.Combine(root, "steamapps", "libraryfolders.vdf"), oversized ? new string('x', 4 * 1024 * 1024 + 1) : "\"broken\" {");
+            SteamLibrarySettings.WriteDetectedDefaults(_directory, root);
+            using var defaults = JsonDocument.Parse(File.ReadAllText(Path.Combine(_directory, "defaults.json")));
+            Assert.Equal(root, Assert.Single(defaults.RootElement.GetProperty("extraLibraryFolders").EnumerateArray()).GetString());
         }
 
         [Fact]
@@ -130,6 +164,8 @@ namespace FocusRgb.Plugin.Steam.Tests
             using var schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "focusrgb-settings.schema.json")));
             Assert.Equal(1, schema.RootElement.GetProperty("schemaVersion").GetInt32());
             var fields = schema.RootElement.GetProperty("fields").EnumerateArray().ToDictionary(field => field.GetProperty("id").GetString()!);
+            Assert.Equal("Steam Path", fields["steamRoot"].GetProperty("displayName").GetString());
+            Assert.Equal("Scanned Libraries", fields["extraLibraryFolders"].GetProperty("displayName").GetString());
             Assert.Equal("directory", fields["steamRoot"].GetProperty("format").GetString());
             Assert.Equal("directory-list", fields["extraLibraryFolders"].GetProperty("format").GetString());
             Assert.Equal("string", fields["steamRoot"].GetProperty("type").GetString());
