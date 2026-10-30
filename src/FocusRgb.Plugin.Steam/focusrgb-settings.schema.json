@@ -4,16 +4,16 @@
   "fields": [
     {
       "id": "steamRoot",
-      "displayName": "Steam installation folder",
-      "description": "Optional absolute local Steam folder. Empty uses automatic detection.",
+      "displayName": "Steam Path",
+      "description": "Absolute local Steam installation folder. Leave empty to use automatic detection.",
       "type": "string",
       "format": "directory",
       "default": ""
     },
     {
       "id": "extraLibraryFolders",
-      "displayName": "Extra Steam library folders",
-      "description": "Choose additional local folders containing steamapps. At most 64 libraries are scanned in total, including detected libraries.",
+      "displayName": "Scanned Libraries",
+      "description": "Local folders containing Steam libraries. Scanned automatically; extra paths can be added.",
       "type": "json",
       "format": "directory-list",
       "default": []

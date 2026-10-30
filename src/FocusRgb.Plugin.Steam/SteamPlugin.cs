@@ -104,7 +104,7 @@ namespace FocusRgb.Plugin.Steam
                 var root = configured ?? fallback.FindSteamRoot();
                 if (Interlocked.Exchange(ref _defaultsWritten, 1) == 0)
                 {
-                    SteamLibrarySettings.WriteDetectedDefaults(dataDirectory, configured is null ? root : null);
+                    SteamLibrarySettings.WriteDetectedDefaults(dataDirectory, root);
                 }
                 return root;
             }
