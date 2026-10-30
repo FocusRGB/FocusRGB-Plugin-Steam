@@ -70,7 +70,7 @@ namespace FocusRgb.Plugin.Steam
                 var temporary = path + ".tmp";
                 try
                 {
-                    File.WriteAllText(temporary, JsonSerializer.Serialize(new { steamRoot = root, extraLibraryFolders = Array.Empty<string>() }));
+                    File.WriteAllText(temporary, JsonSerializer.Serialize(new { steamRoot = root, extraLibraryFolders = DetectedLibraries(root) }));
                     File.Move(temporary, path, true);
                 }
                 finally
@@ -95,6 +95,36 @@ namespace FocusRgb.Plugin.Steam
                 throw new FormatException("The local Steam library is unavailable.");
             _ = Directory.EnumerateFileSystemEntries(Path.Combine(path, "steamapps")).Take(1).ToArray();
             return path;
+        }
+
+        private static IReadOnlyList<string> DetectedLibraries(string root)
+        {
+            if (root.Length == 0) return [];
+            var libraries = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { root };
+            try
+            {
+                using var stream = File.OpenRead(Path.Combine(root, "steamapps", "libraryfolders.vdf"));
+                const int maximumBytes = 4 * 1024 * 1024;
+                if (stream.Length > maximumBytes) return [.. libraries];
+                // Bound the actual read as well as the size check, including a concurrently growing file.
+                using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true);
+                var buffer = new char[maximumBytes + 1];
+                var count = reader.ReadBlock(buffer, 0, buffer.Length);
+                if (count > maximumBytes) return [.. libraries];
+                var entries = VdfParser.Parse(new string(buffer, 0, count)).GetObject("libraryfolders");
+                foreach (var entry in entries?.Values ?? [])
+                {
+                    if (libraries.Count >= SteamCatalogReader.MaximumLibraries) break;
+                    var path = entry.Value is VdfObject value ? value.GetString("path") : entry.Value as string;
+                    if (string.IsNullOrWhiteSpace(path)) continue;
+                    try { libraries.Add(NormalizeLibrary(path)); }
+                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException
+                        or ArgumentException or NotSupportedException or FormatException) { }
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SecurityException
+                or ArgumentException or NotSupportedException or FormatException) { }
+            return [.. libraries];
         }
 
         private static SteamLibrarySettings Invalid(string error) => new() { Error = error };
